@@ -28,17 +28,25 @@
 
 #include <string.h>
 
+#include <snappy.h>
+
+#include <chrono>
 #include <map>
 #include <sstream>
+#include <thread>
 
 #include "retrace.hpp"
 #include "glproc.h"
 #include "glstate.hpp"
 #include "glretrace.hpp"
+#include "os_dl.hpp"
 #include "os_time.hpp"
 #include "os_memory.hpp"
 #include "highlight.hpp"
 #include "metric_writer.hpp"
+#include "retrace_library.hpp"
+
+using namespace std::chrono_literals;
 
 /* Synchronous debug output may reduce performance however,
  * without it the callNo in the callback may be inaccurate
@@ -878,13 +886,132 @@ retrace::setUp(void) {
 void
 retrace::addCallbacks(retrace::Retracer &retracer)
 {
-    retracer.addCallbacks(glretrace::gl_callbacks);
-    retracer.addCallbacks(glretrace::glx_callbacks);
-    retracer.addCallbacks(glretrace::wgl_callbacks);
-    retracer.addCallbacks(glretrace::cgl_callbacks);
-    retracer.addCallbacks(glretrace::egl_callbacks);
+    std::vector<const Entry *> entries_array = {
+        glretrace::gl_callbacks,
+        glretrace::glx_callbacks,
+        glretrace::wgl_callbacks,
+        glretrace::cgl_callbacks,
+        glretrace::egl_callbacks,
+    };
+
+    if (retrace::generateC) {
+        for (auto entries : entries_array) {
+            while (entries->name && entries->callback) {
+                Entry entry = {entries->name, glretrace::dump_call_as_c};
+                retracer.addCallback(&entry);
+                entries++;
+            }
+        }
+
+        glretrace::dump_c_start();
+    } else {
+        for (auto entries : entries_array)
+            retracer.addCallbacks(entries);
+    }
 }
 
+#define DATA_FILE_CHUNK_SIZE (1 * 1024 * 1024)
+
+static void
+load_data_async(const std::string &filename, replay_data *data) {
+    std::ifstream data_file(filename, std::ios_base::binary);
+
+    data_file.seekg(0, std::ios_base::end);
+    uint64_t compressed_length = data_file.tellg();
+    data_file.seekg(0, std::ios_base::beg);
+
+    uint64_t read_offset = 0;
+    char *blob = (char *)malloc(compressed_length);
+    data->data = blob;
+
+    while (read_offset < compressed_length) {
+        data_file.read(blob + read_offset, std::min(compressed_length - read_offset, (uint64_t)DATA_FILE_CHUNK_SIZE));
+        read_offset += DATA_FILE_CHUNK_SIZE;
+        data->loaded_size.store(read_offset);
+    }
+
+    data_file.close();
+}
+
+void
+retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
+    retrace::addCallbacks(retracer);
+
+    long long startTime = 0;
+    long long endTime = 0;
+    float timeInterval = 0;
+    retrace::frameNo = 0;
+
+    std::cout << "info: opening '" << library << "'..." << std::flush;
+    startTime = os::getTime();
+
+    os::Library replay = os::openLibrary(library);
+    get_replay_sequences_cb get_sequences = (get_replay_sequences_cb)os::getLibrarySymbol(
+        replay, "get_replay_sequences");
+    if (!get_sequences) {
+        std::cout << "error: " << dlerror() << std::endl;
+        return;
+    }
+
+    endTime = os::getTime();
+    timeInterval = (endTime - startTime) * (1.0 / os::timeFrequency);
+    std::cout << " (" << timeInterval << " secs)" << std::endl;
+
+    replay_data data = {
+        .loaded_size = 0,
+    };
+
+    std::string data_file_path = std::string(library) + ".data";
+    std::thread data_load_thread(load_data_async, data_file_path, &data);
+
+    replay_args args = {
+        .get_public_proc_addr = _getPublicProcAddress,
+        .get_private_proc_addr = _getPrivateProcAddress,
+        .resize_window = glretrace::updateDrawable,
+        .data = &data,
+    };
+
+    const replay_sequence *sequences;
+    uint32_t sequence_count;
+    get_sequences(&sequences, &sequence_count, &args);
+
+    startTime = os::getTime();
+
+    for (uint32_t i = 0; i < sequence_count; i++) {
+        /* Wait for data to be loaded if it is needed. */
+        while (sequences[i].required_data_size > data.loaded_size.load()) {
+            std::this_thread::sleep_for(100us);
+            std::cout << "warning: Waiting for data (size =" << sequences[i].required_data_size << ")" << std::endl;
+        }
+
+        if (sequences[i].run_api) {
+            sequences[i].run_api();
+        } else {
+            retrace::retraceCall(sequences[i].call);
+        }
+    }
+
+    data_load_thread.join();
+    free(data.data);
+
+    retrace::finishRendering();
+
+    endTime = os::getTime();
+    timeInterval = (endTime - startTime) * (1.0 / os::timeFrequency);
+
+    if ((retrace::verbosity >= -1) || (retrace::profiling)) {
+        std::cout <<
+            "Rendered " << retrace::frameNo << " frames"
+            " in " <<  timeInterval << " secs,"
+            " average of " << (retrace::frameNo/timeInterval) << " fps\n";
+    }
+
+    if (retrace::waitOnFinish) {
+        retrace::waitForInput();
+    } else {
+        return;
+    }
+}
 
 void
 retrace::flushRendering(void) {
@@ -900,6 +1027,9 @@ retrace::flushRendering(void) {
 
 void
 retrace::finishRendering(void) {
+    if (retrace::generateC)
+        glretrace::dump_c_end();
+
     if (profilingWithBackends && glretrace::curMetricBackend) {
             (glretrace::curMetricBackend)->endQuery(QUERY_BOUNDARY_FRAME);
     }
