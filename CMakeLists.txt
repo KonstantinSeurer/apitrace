@@ -326,8 +326,8 @@ else ()
         add_compiler_flags (-Wno-pointer-bool-conversion)
     endif ()
 
-    # No RTTI required
-    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+    # # No RTTI required
+    # set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
 
     # Disable C++ exceptions
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions")
