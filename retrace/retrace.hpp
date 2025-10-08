@@ -203,6 +203,11 @@ extern unsigned callNo;
 
 extern trace::DumpFlags dumpFlags;
 
+extern bool waitOnFinish;
+
+extern bool generateC;
+extern std::string Cpath;
+
 std::ostream &warning(trace::Call &call);
 
 #ifdef _WIN32
@@ -231,6 +236,7 @@ struct stringComparer {
 
 
 extern const Entry stdc_callbacks[];
+extern const Entry stdc_dump_as_c_callbacks[];
 
 
 class Retracer
@@ -242,7 +248,6 @@ class Retracer
 
 public:
     Retracer() {
-        addCallbacks(stdc_callbacks);
     }
 
     virtual ~Retracer() {}
@@ -282,6 +287,12 @@ setUp(void);
 
 void
 addCallbacks(retrace::Retracer &retracer);
+
+void
+replayBinary(retrace::Retracer &retracer, const char *library);
+
+void
+retraceCall(trace::Call *call);
 
 void
 frameComplete(trace::Call &call);
