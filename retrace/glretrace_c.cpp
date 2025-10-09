@@ -70,11 +70,11 @@ static std::vector<trace::Call *> calls;
 
 #define MAX_SEQUENCE_LENGTH 10000
 
-static long long unsigned
-get_uint_arg(const trace::Call &call, const char *name, uint64_t default_value) {
+static long long
+get_int_arg(const trace::Call &call, const char *name, long long default_value) {
     for (uint32_t i = 0; i < call.args.size(); i++) {
         if (name && !strcmp(name, call.sig->arg_names[i]))
-            return call.args[i].value->toUInt();
+            return call.args[i].value->toSInt();
     }
     return default_value;
 }
@@ -162,25 +162,25 @@ print_get_handle(FILE *out, const trace::Call &call, const retrace::HandleType *
                  unsigned long long handle) {
     register_handle_map(handle_type);
     if (handle_type->key_name) {
-        long long unsigned key = get_uint_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name));
-        fprintf(out, "get_%s((%s)%llu, (%s)%llu))", handle_type->name,
+        long long key = get_int_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name));
+        fprintf(out, "get_%s((%s)%lli, (%s)%lli))", handle_type->name,
                 handle_type->key_type->c_decl.c_str(), key, handle_type->c_decl.c_str(), handle);
     } else {
-        fprintf(out, "get_%s((%s)%llu)", handle_type->name, handle_type->c_decl.c_str(), handle);
+        fprintf(out, "get_%s((%s)%lli)", handle_type->name, handle_type->c_decl.c_str(), handle);
     }
 }
 
 static void
 print_set_handle(FILE *out, const trace::Call &call, const retrace::HandleType *handle_type,
-                 unsigned long long handle) {
+                 long long handle) {
     register_handle_map(handle_type);
     if (handle_type->key_name) {
-        long long unsigned key = get_uint_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name));
-        fprintf(out, "set_%s((%s)%llu, (%s)%llu, %llu, ", handle_type->name, handle_type->key_type->c_decl.c_str(), key,
-                handle_type->c_decl.c_str(), handle, get_uint_arg(call, handle_type->range, 1));
+        long long key = get_int_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name));
+        fprintf(out, "set_%s((%s)%lli, (%s)%lli, %lli, ", handle_type->name, handle_type->key_type->c_decl.c_str(), key,
+                handle_type->c_decl.c_str(), handle, get_int_arg(call, handle_type->range, 1));
     } else {
-        fprintf(out, "set_%s((%s)%llu, %llu, ", handle_type->name,
-                handle_type->c_decl.c_str(), handle, get_uint_arg(call, handle_type->range, 1));
+        fprintf(out, "set_%s((%s)%lli, %lli, ", handle_type->name,
+                handle_type->c_decl.c_str(), handle, get_int_arg(call, handle_type->range, 1));
     }
 }
 
@@ -238,8 +238,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
     }
 
     if (type->kind == retrace::ValueTypeKind::_enum) {
-        trace::Enum *v = (trace::Enum *)value;
-        fprintf(out, "%s", v->lookup()->name);
+        fprintf(out, "%lli", value->toSInt());
         return false;
     }
 
@@ -680,7 +679,7 @@ void glretrace::dump_call_as_c(trace::Call &call) {
     if (func_type->return_type->kind == retrace::ValueTypeKind::handle && call.ret) {
         const retrace::HandleType *handle_type =
             (const retrace::HandleType *)func_type->return_type;
-        print_set_handle(sequence_file, call, handle_type, call.ret->toUInt());
+        print_set_handle(sequence_file, call, handle_type, call.ret->toSInt());
     } else if (func_type->return_type->kind == retrace::ValueTypeKind::linear_pointer && call.ret) {
         fprintf(sequence_file, "addRegion(%llu, ", call.ret->toUIntPtr());
     }
