@@ -332,6 +332,12 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
             fprintf(out, "NULL");
             return false;
         }
+
+        trace::Pointer *p = dynamic_cast<trace::Pointer *>(value);
+        if (p) {
+            fprintf(out, "(%s)toPointer(%llu)", type->c_decl.c_str(), p->toUIntPtr());
+            return false;
+        }
       
         trace::Blob *v = dynamic_cast<trace::Blob *>(value);
         if (!v)
