@@ -913,21 +913,23 @@ retrace::addCallbacks(retrace::Retracer &retracer)
 #define DATA_FILE_CHUNK_SIZE (1 * 1024 * 1024)
 
 static void
-load_data_async(const std::string &filename, replay_data *data) {
+load_data_async(const std::string &filename, uint64_t data_size, replay_data *data) {
     std::ifstream data_file(filename, std::ios_base::binary);
 
-    data_file.seekg(0, std::ios_base::end);
-    uint64_t compressed_length = data_file.tellg();
-    data_file.seekg(0, std::ios_base::beg);
-
-    uint64_t read_offset = 0;
-    char *blob = (char *)malloc(compressed_length);
+    uint64_t dst_offset = 0;
+    char *blob = (char *)malloc(data_size);
+    char *compressed_buffer = (char *)malloc(snappy::MaxCompressedLength(DATA_FILE_CHUNK_SIZE));
     data->data = blob;
 
-    while (read_offset < compressed_length) {
-        data_file.read(blob + read_offset, std::min(compressed_length - read_offset, (uint64_t)DATA_FILE_CHUNK_SIZE));
-        read_offset += DATA_FILE_CHUNK_SIZE;
-        data->loaded_size.store(read_offset);
+    while (dst_offset < data_size) {
+        size_t compressed_length = 0;
+        data_file.read((char *)&compressed_length, sizeof(size_t));
+        data_file.read(compressed_buffer, compressed_length);
+        size_t uncompressed_length = 0;
+        snappy::GetUncompressedLength(compressed_buffer, compressed_length, &uncompressed_length);
+        snappy::RawUncompress(compressed_buffer, compressed_length, blob + dst_offset);
+        dst_offset += uncompressed_length;
+        data->loaded_size.store(dst_offset);
     }
 
     data_file.close();
@@ -961,9 +963,6 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
         .loaded_size = 0,
     };
 
-    std::string data_file_path = std::string(library) + ".data";
-    std::thread data_load_thread(load_data_async, data_file_path, &data);
-
     replay_args args = {
         .get_public_proc_addr = _getPublicProcAddress,
         .get_private_proc_addr = _getPrivateProcAddress,
@@ -974,6 +973,22 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     const replay_sequence *sequences;
     uint32_t sequence_count;
     get_sequences(&sequences, &sequence_count, &args);
+
+    /* The data is allocated with increasing offsets so the last sequence
+     * that requires data should require the whole data size.
+     */
+    uint64_t data_size = 0;
+    for (int64_t i = sequence_count - 1; i >= 0; i--) {
+        if (sequences[i].required_data_size) {
+            data_size = sequences[i].required_data_size;
+            break;
+        }
+    }
+
+    std::cout << "info: Streaming " << (data_size / 1024 / 1024) << " MiB during replay..." << std::endl;
+
+    std::string data_file_path = std::string(library) + ".data";
+    std::thread data_load_thread(load_data_async, data_file_path, data_size, &data);
 
     startTime = os::getTime();
 
