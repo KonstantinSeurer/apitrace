@@ -308,7 +308,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
         const retrace::ArrayType *array_type = (const retrace::ArrayType *)type;
         trace::Array *v = value->toArray();
         if (!v) {
-            fprintf(out, "nullptr");
+            fprintf(out, "NULL");
             return false;
         }
         fprintf(out, "(%s[]){", array_type->type->c_decl.c_str());
@@ -329,7 +329,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
     if (type->kind == retrace::ValueTypeKind::blob) {
         const retrace::BlobType *blob_type = (const retrace::BlobType *)type;
         if (value->toNull()) {
-            fprintf(out, "nullptr");
+            fprintf(out, "NULL");
             return false;
         }
       
