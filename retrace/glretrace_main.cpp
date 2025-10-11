@@ -944,7 +944,7 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     float timeInterval = 0;
     retrace::frameNo = 0;
 
-    std::cout << "info: opening '" << library << "'..." << std::flush;
+    std::cout << "info: Opening '" << library << "'..." << std::flush;
     startTime = os::getTime();
 
     os::Library replay = os::openLibrary(library);
