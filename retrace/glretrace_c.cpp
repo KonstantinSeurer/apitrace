@@ -426,7 +426,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
 }
 
 static const std::string &
-get_value_construction(const std::string &construction) {
+deduplicate_value_construction(const std::string &construction) {
     if (value_variables.find(construction) == value_variables.end()) {
         std::string variable_name =
             std::string("value") + std::to_string(value_index);
@@ -441,145 +441,129 @@ get_value_construction(const std::string &construction) {
     return value_variables.at(construction);
 }
 
-static void
-print_value_construction(FILE *out, trace::Value *value) {
+static std::string
+get_value_construction(trace::Value *value) {
     if (!value) {
-        fprintf(out, "nullptr");
-        return;
+        return "nullptr";
     }
 
     if (auto v = dynamic_cast<trace::Bool *>(value)) {
-        fprintf(out, "&%s", v->value ? "true_value" : "false_value");
-        return;
+        return v->value ? "&true_value" : "&false_value";
     }
 
     if (dynamic_cast<trace::Null *>(value)) {
-        fprintf(out, "&null_value");
-        return;
+        return "&null_value";
     }
 
     if (auto v = dynamic_cast<trace::SInt *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::SInt(" +
-                                       std::to_string(v->value) + ")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::SInt(" + std::to_string(v->value) + ")");
     }
 
     if (auto v = dynamic_cast<trace::Bitmask *>(value)) {
         const trace::BitmaskSig *sig = v->sig;
-        fprintf(out, "createBitmask(%u, {", sig->id);
+        std::string expr = "createBitmask(" + std::to_string(sig->id) + ", {";
         for (uint32_t i = 0; i < sig->num_flags; i++) {
-          if (i)
-            fprintf(out, ", ");
-          fprintf(out, "{\"%s\", %llu}", sig->flags[i].name, sig->flags[i].value);
+            if (i)
+                expr += ", ";
+            expr += "{\"";
+            expr += sig->flags[i].name;
+            expr += "\", ";
+            expr += std::to_string(sig->flags[i].value);
+            expr += "}";
         }
-        fprintf(out, "}, %llu)", v->value);
-        return;
+        expr += "}, ";
+        expr += std::to_string(v->value);
+        expr += ")";
+        return deduplicate_value_construction(expr);
     }
 
     if (auto v = dynamic_cast<trace::Pointer *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::Pointer(" +
-                                       std::to_string(v->value) + ")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::Pointer(" + std::to_string(v->value) + ")");
     }
 
     if (auto v = dynamic_cast<trace::UInt *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::UInt(" +
-                                       std::to_string(v->value) + ")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::UInt(" + std::to_string(v->value) + ")");
     }
 
     if (auto v = dynamic_cast<trace::Float *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::Float(" +
-                                       std::to_string(v->value) + ")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::Float(" + std::to_string(v->value) + ")");
     }
 
     if (auto v = dynamic_cast<trace::Double *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::Double(" +
-                                       std::to_string(v->value) + ")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::Double(" + std::to_string(v->value) + ")");
     }
 
     if (auto v = dynamic_cast<trace::String *>(value)) {
-        fprintf(out, "%s",
-                get_value_construction("new trace::String(\"" +
-                                       std::string(v->value) + "\")")
-                    .c_str());
-        return;
+        return deduplicate_value_construction("new trace::String(\"" + std::string(v->value) + "\")");
     }
 
     if (dynamic_cast<trace::WString *>(value)) {
         abort();
-        return;
+        return "nullptr";
     }
 
     if (dynamic_cast<trace::Enum *>(value)) {
         abort();
-        return;
+        return "nullptr";
     }
 
     if (auto v = dynamic_cast<trace::Struct *>(value)) {
         const trace::StructSig *sig = v->sig;
-        fprintf(out, "createStruct(%u, \"%s\", {", sig->id, sig->name);
+        std::string expr = "createStruct(" + std::to_string(sig->id) + ", \"" + sig->name + "\", {";
         for (uint32_t i = 0; i < v->members.size(); i++) {
             if (i)
-                fprintf(out, ", ");
-            fprintf(out, "{\"%s\", ", sig->member_names[i]);
-            print_value_construction(out, v->members[i]);
-            fprintf(out, "}");
+                expr += ", ";
+            expr += "{\"";
+            expr += sig->member_names[i];
+            expr += "\", ";
+            expr += get_value_construction(v->members[i]);
+            expr += "}";
         }
-        fprintf(out, "})");
-        return;
+        expr += "})";
+        return deduplicate_value_construction(expr);
     }
 
     if (auto v = dynamic_cast<trace::Array *>(value)) {
-        fprintf(out, "createArray({");
+        std::string expr = "createArray({";
         for (uint32_t i = 0; i < v->values.size(); i++) {
             if (i)
-                fprintf(out, ", ");
-            print_value_construction(out, v->values[i]);
+                expr += ", ";
+            expr += get_value_construction(v->values[i]);
         }
-        fprintf(out, "})");
-        return;
+        expr += "})";
+        return deduplicate_value_construction(expr);
     }
 
     if (dynamic_cast<trace::Blob *>(value)) {
         abort();
-        return;
+        return "nullptr";
     }
 
     if (dynamic_cast<trace::Repr *>(value)) {
         abort();
-        return;
+        return "nullptr";
     }
 
     abort();
 }
 
-static void
-print_call_construction(FILE *out, trace::Call *call) {
+static std::string
+get_call_construction(trace::Call *call) {
     const trace::FunctionSig *sig = call->sig;
-    fprintf(out, "createCall(%u, \"%s\", %u, ", sig->id, sig->name, call->flags);
-    print_value_construction(out, call->ret);
-    fprintf(out, ", {");
+    std::string expr = "createCall(" + std::to_string(sig->id) + ", \"" + sig->name + "\", " + std::to_string(call->flags) + ", ";
+    expr += get_value_construction(call->ret);
+    expr += ", {";
     for (uint32_t i = 0; i < call->args.size(); i++) {
         if (i)
-            fprintf(out, ", ");
-        fprintf(out, "{\"%s\", ", sig->arg_names[i]);
-        print_value_construction(out, call->args[i].value);
-        fprintf(out, "}");
+            expr += ", ";
+        expr += "{\"";
+        expr += sig->arg_names[i];
+        expr += "\", ";
+        expr += get_value_construction(call->args[i].value);
+        expr += "}";
     }
-    fprintf(out, "})");
+    expr += "})";
+    return deduplicate_value_construction(expr);
 }
 
 static bool value_type_has_handle(const retrace::ValueType *type) {
@@ -672,9 +656,7 @@ void glretrace::dump_call_as_c(trace::Call &call) {
     }
 
     if (new_wsi_sequence) {
-        fprintf(main_file, "    {nullptr, ");
-        print_call_construction(main_file, &call);
-        fprintf(main_file, ", 0},\n");
+        fprintf(main_file, "    {nullptr, %s, 0},\n", get_call_construction(&call).c_str());
         return;
     }
 
