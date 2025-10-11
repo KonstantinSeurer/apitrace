@@ -122,10 +122,38 @@ register_handle_map(const retrace::HandleType *handle_type) {
                     handle_type->c_decl.c_str());
             fprintf(
                 state_file,
-                "%s\nget_%s(%s key, %s trace) {\n    return %s_map[key][trace];\n}\n",
+                "%s\nget_%s(%s key, %s trace) {\n    return %s_map[key]",
                 handle_type->c_decl.c_str(), handle_type->name,
                 handle_type->key_type->c_decl.c_str(), handle_type->c_decl.c_str(),
                 handle_type->name);
+            if (!strcmp("location", handle_type->name)) {
+                fprintf(state_file, ".lookupUniformLocation(trace);\n}\n");
+            } else {
+                fprintf(state_file, "[trace];\n}\n");
+            }
+
+            if (!strcmp("uniformBlock", handle_type->name)) {
+                fprintf(state_file, "%s", R"(
+void
+mapUniformBlockName(GLuint program, GLint index, const char *name) {
+    program = get_program(program);
+    GLint num_blocks = 0;
+    glGetProgramiv(program, GL_ACTIVE_UNIFORM_BLOCKS, &num_blocks);
+    for (int i = 0; i < num_blocks; i++) {
+        GLint buf_len;
+        glGetActiveUniformBlockiv(program, i, GL_UNIFORM_BLOCK_NAME_LENGTH, &buf_len);
+        std::vector<char> name_buf(buf_len + 1);
+        GLint length;
+        glGetActiveUniformBlockName(program, i, name_buf.size(), &length, name_buf.data());
+        name_buf[length] = '\0';
+        if (!strcmp(name, name_buf.data())) {
+            uniformBlock_map[program][index] = i;
+            return;
+        }
+    }
+}
+)");
+            }
         } else {
             fprintf(sequence_h_file,
                     "void set_%s(%s trace, uint32_t range, %s actual);\n",
@@ -601,7 +629,9 @@ void glretrace::dump_call_as_c(trace::Call &call) {
     if (ignore_calls.find(call.name()) != ignore_calls.end())
         return;
 
-    if (call.flags & trace::CALL_FLAG_NO_SIDE_EFFECTS)
+    bool is_active_uniform_block_name = !strcmp("glGetActiveUniformBlockName", call.name());
+
+    if ((call.flags & trace::CALL_FLAG_NO_SIDE_EFFECTS) && !is_active_uniform_block_name)
         return;
 
     bool new_wsi_sequence =
@@ -649,6 +679,12 @@ void glretrace::dump_call_as_c(trace::Call &call) {
     }
 
     call_index++;
+
+    if (is_active_uniform_block_name) {
+        fprintf(sequence_file, "    mapUniformBlockName(%llu, %llu, \"%s\");\n",
+                call.arg(0).toUInt(), call.arg(1).toUInt(), call.arg(4).toString());
+        return;
+    }
 
     const retrace::FunctionType *func_type = nullptr;
     if (gl_func_types.find(call.name()) != gl_func_types.end())
@@ -1086,6 +1122,9 @@ void *toPointer(uintptr_t address);
 void resize_window(int width, int height);
 
 GLenum clientWaitSync(GLenum result, GLsync sync, GLbitfield flags, GLuint64 timeout);
+
+void mapUniformBlockName(GLuint program, GLint index, const char *name);
+
 )");
 
     data_file = fopen((target_directory / "data.bin").c_str(), "wb");
