@@ -994,9 +994,15 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
 
     for (uint32_t i = 0; i < sequence_count; i++) {
         /* Wait for data to be loaded if it is needed. */
-        while (sequences[i].required_data_size > data.loaded_size.load()) {
-            std::this_thread::sleep_for(100us);
-            std::cout << "warning: Waiting for data (size =" << sequences[i].required_data_size << ")" << std::endl;
+        if (sequences[i].required_data_size && sequences[i].required_data_size > data.loaded_size.load()) {
+            long long waitStartTime = os::getTime();
+            do  {
+                std::this_thread::sleep_for(100us);
+            } while ((sequences[i].required_data_size > data.loaded_size.load()));
+            long long waitEndTime = os::getTime();
+            timeInterval = (waitEndTime - waitStartTime) * (1.0 / os::timeFrequency);
+            std::cout << "warning: Waited " << timeInterval << " secs for data (size = "
+                      << (sequences[i].required_data_size / 1024 / 1024) << " MiB)" << std::endl;
         }
 
         if (sequences[i].run_api) {
