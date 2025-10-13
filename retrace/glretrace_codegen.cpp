@@ -622,7 +622,7 @@ before_call(bool new_wsi_sequence) {
         call_index++;
 }
 
-void glretrace::dump_call_as_c(trace::Call &call) {
+void glretrace::call_codegen(trace::Call &call) {
     if (ignore_calls.find(call.name()) != ignore_calls.end())
         return;
 
@@ -851,7 +851,7 @@ copy_file(const char *filename, const char *content) {
 }
 
 void
-glretrace::dump_c_start() {
+glretrace::codegen_start() {
     target_directory = retrace::Cpath;
 
     std::filesystem::create_directory(target_directory);
@@ -1085,7 +1085,7 @@ void mapUniformBlockName(GLuint program, GLint index, const char *name);
 }
 
 void
-glretrace::dump_c_end() {
+glretrace::codegen_end() {
     end_sequence();
 
     fclose(values_file);
@@ -1169,7 +1169,7 @@ get_replay_sequences(const replay_sequence **out_sequences, uint32_t *out_sequen
 }
 
 static void
-dump_malloc_as_c(trace::Call &call) {
+malloc_codegen(trace::Call &call) {
     unsigned long long size = call.arg(0).toUInt();
     unsigned long long address = call.ret->toUIntPtr();
 
@@ -1182,7 +1182,7 @@ dump_malloc_as_c(trace::Call &call) {
 }
 
 static void
-dump_memcpy_as_c(trace::Call &call) {
+memcpy_codegen(trace::Call &call) {
     unsigned long long size = call.arg(2).toUInt();
     if (size) {
         before_call(false);
@@ -1201,5 +1201,5 @@ dump_memcpy_as_c(trace::Call &call) {
     }
 }
 
-const retrace::Entry retrace::stdc_dump_as_c_callbacks[] = {
-    {"malloc", &dump_malloc_as_c}, {"memcpy", &dump_memcpy_as_c}, {NULL, NULL}};
+const retrace::Entry retrace::stdc_codegen_callbacks[] = {
+    {"malloc", &malloc_codegen}, {"memcpy", &memcpy_codegen}, {NULL, NULL}};

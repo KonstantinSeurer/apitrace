@@ -188,8 +188,8 @@ add_dependencies (retrace_common version)
 add_library (glretrace_common STATIC
     glretrace.hpp
     glretrace_gl.cpp
-    glretrace_c.cpp
     glretrace_cgl.cpp
+    glretrace_codegen.cpp
     glretrace_glx.cpp
     glretrace_wgl.cpp
     glretrace_wgl_font_bitmaps.cpp

@@ -900,13 +900,13 @@ retrace::addCallbacks(retrace::Retracer &retracer)
     if (retrace::generateC) {
         for (auto entries : entries_array) {
             while (entries->name && entries->callback) {
-                Entry entry = {entries->name, glretrace::dump_call_as_c};
+                Entry entry = {entries->name, glretrace::call_codegen};
                 retracer.addCallback(&entry);
                 entries++;
             }
         }
 
-        glretrace::dump_c_start();
+        glretrace::codegen_start();
     } else {
         for (auto entries : entries_array)
             retracer.addCallbacks(entries);
@@ -1063,7 +1063,7 @@ retrace::flushRendering(void) {
 void
 retrace::finishRendering(void) {
     if (retrace::generateC)
-        glretrace::dump_c_end();
+        glretrace::codegen_end();
 
     if (profilingWithBackends && glretrace::curMetricBackend) {
             (glretrace::curMetricBackend)->endQuery(QUERY_BOUNDARY_FRAME);

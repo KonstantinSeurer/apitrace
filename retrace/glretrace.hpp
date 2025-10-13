@@ -196,11 +196,11 @@ extern const retrace::Entry egl_callbacks[];
 
 extern const std::unordered_map<std::string, retrace::FunctionType> gl_func_types;
 
-void dump_c_start();
+void codegen_start();
 
-void dump_call_as_c(trace::Call &call);
+void call_codegen(trace::Call &call);
 
-void dump_c_end();
+void codegen_end();
 
 void frame_complete(trace::Call &call);
 void initContext();

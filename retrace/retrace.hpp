@@ -236,7 +236,7 @@ struct stringComparer {
 
 
 extern const Entry stdc_callbacks[];
-extern const Entry stdc_dump_as_c_callbacks[];
+extern const Entry stdc_codegen_callbacks[];
 
 
 class Retracer
