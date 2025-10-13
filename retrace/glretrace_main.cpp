@@ -30,8 +30,10 @@
 
 #include <snappy.h>
 
+#include <atomic>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -690,6 +692,7 @@ static void APIENTRY
 debugOutputCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
                     GLsizei length, const GLchar* message, const void *userParam)
 {
+    return;
     /* Ignore application messages while dumping state. */
     if (retrace::dumpingState &&
         source == GL_DEBUG_SOURCE_APPLICATION) {
@@ -910,29 +913,48 @@ retrace::addCallbacks(retrace::Retracer &retracer)
     }
 }
 
-#define DATA_FILE_CHUNK_SIZE (1 * 1024 * 1024)
+/* Allow loading 1 GiB more than what is currently needed. */
+#define MAX_DATA_READ_AHEAD (1024 * 1024 * 1024)
+
+struct data_buffer {
+    void *data;
+    uint64_t size;
+};
 
 static void
-load_data_async(const std::string &filename, uint64_t data_size, replay_data *data) {
-    std::ifstream data_file(filename, std::ios_base::binary);
+load_data_async(const std::string &filename, data_buffer *sequence_data, std::atomic<uint32_t> *loaded_sequence_data_count,
+                std::atomic<uint64_t> *consumed_data_size) {
+    FILE *data_file = fopen(filename.c_str(), "rb");
 
-    uint64_t dst_offset = 0;
-    char *blob = (char *)malloc(data_size);
-    char *compressed_buffer = (char *)malloc(snappy::MaxCompressedLength(DATA_FILE_CHUNK_SIZE));
-    data->data = blob;
+    std::vector<char> compressed_buffer;
 
-    while (dst_offset < data_size) {
+    uint64_t loaded_data_size = 0;
+    for (uint32_t i = 0;; i++) {
         size_t compressed_length = 0;
-        data_file.read((char *)&compressed_length, sizeof(size_t));
-        data_file.read(compressed_buffer, compressed_length);
+        if (!fread(&compressed_length, sizeof(size_t), 1, data_file))
+            break;
+
+        compressed_buffer.resize(compressed_length);
+        fread(compressed_buffer.data(), compressed_length, 1, data_file);
+
         size_t uncompressed_length = 0;
-        snappy::GetUncompressedLength(compressed_buffer, compressed_length, &uncompressed_length);
-        snappy::RawUncompress(compressed_buffer, compressed_length, blob + dst_offset);
-        dst_offset += uncompressed_length;
-        data->loaded_size.store(dst_offset);
+        snappy::GetUncompressedLength(compressed_buffer.data(), compressed_length, &uncompressed_length);
+        void *data = malloc(uncompressed_length);
+        snappy::RawUncompress(compressed_buffer.data(), compressed_length, (char *)data);
+        sequence_data[i].data = data;
+        sequence_data[i].size = uncompressed_length;
+
+        *loaded_sequence_data_count = i + 1;
+
+        loaded_data_size += uncompressed_length;
+
+        /* Do not read to far ahead to limit memory usage. */
+        while (loaded_data_size > *consumed_data_size + MAX_DATA_READ_AHEAD) {
+            std::this_thread::sleep_for(1ms);
+        }
     }
 
-    data_file.close();
+    fclose(data_file);
 }
 
 void
@@ -959,61 +981,53 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     timeInterval = (endTime - startTime) * (1.0 / os::timeFrequency);
     std::cout << " (" << timeInterval << " secs)" << std::endl;
 
-    replay_data data = {
-        .loaded_size = 0,
-    };
-
     replay_args args = {
         .get_public_proc_addr = _getPublicProcAddress,
         .get_private_proc_addr = _getPrivateProcAddress,
         .resize_window = glretrace::updateDrawable,
-        .data = &data,
     };
 
     const replay_sequence *sequences;
     uint32_t sequence_count;
     get_sequences(&sequences, &sequence_count, &args);
 
-    /* The data is allocated with increasing offsets so the last sequence
-     * that requires data should require the whole data size.
-     */
-    uint64_t data_size = 0;
-    for (int64_t i = sequence_count - 1; i >= 0; i--) {
-        if (sequences[i].required_data_size) {
-            data_size = sequences[i].required_data_size;
-            break;
-        }
-    }
-
-    std::cout << "info: Streaming " << (data_size / 1024 / 1024) << " MiB during replay..." << std::endl;
+    data_buffer *sequence_data = new data_buffer[sequence_count];
+    std::atomic<uint32_t> loaded_sequence_data_count = 0;
+    std::atomic<uint64_t> consumed_data_size = 0;
 
     std::string data_file_path = std::string(library) + ".data";
-    std::thread data_load_thread(load_data_async, data_file_path, data_size, &data);
+    std::thread data_load_thread(load_data_async, data_file_path, sequence_data, &loaded_sequence_data_count, &consumed_data_size);
 
     startTime = os::getTime();
 
+    uint32_t sequence_data_index = 0;
     for (uint32_t i = 0; i < sequence_count; i++) {
-        /* Wait for data to be loaded if it is needed. */
-        if (sequences[i].required_data_size && sequences[i].required_data_size > data.loaded_size.load()) {
-            long long waitStartTime = os::getTime();
-            do  {
-                std::this_thread::sleep_for(100us);
-            } while ((sequences[i].required_data_size > data.loaded_size.load()));
-            long long waitEndTime = os::getTime();
-            timeInterval = (waitEndTime - waitStartTime) * (1.0 / os::timeFrequency);
-            std::cout << "warning: Waited " << timeInterval << " secs for data (size = "
-                      << (sequences[i].required_data_size / 1024 / 1024) << " MiB)" << std::endl;
-        }
-
         if (sequences[i].run_api) {
-            sequences[i].run_api();
+            /* Wait for data to be loaded if it is needed. */
+            if (sequence_data_index >= loaded_sequence_data_count) {
+                long long waitStartTime = os::getTime();
+                do  {
+                    std::this_thread::sleep_for(100us);
+                } while (sequence_data_index >= loaded_sequence_data_count);
+                long long waitEndTime = os::getTime();
+                timeInterval = (waitEndTime - waitStartTime) * (1.0 / os::timeFrequency);
+                std::cout << "warning: Waited " << timeInterval << " secs for data (sequence = "
+                          << sequence_data_index << ")" << std::endl;
+            }
+
+            sequences[i].run_api((uintptr_t)sequence_data[sequence_data_index].data);
+
+            free(sequence_data[sequence_data_index].data);
+            consumed_data_size += sequence_data[sequence_data_index].size;
+
+            sequence_data_index++;
         } else {
             retrace::retraceCall(sequences[i].call);
         }
     }
 
     data_load_thread.join();
-    free(data.data);
+    delete[] sequence_data;
 
     retrace::finishRendering();
 
