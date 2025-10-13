@@ -58,13 +58,8 @@ static FILE *values_file = nullptr;
 static FILE *state_file = nullptr;
 static FILE *data_file = nullptr;
 
-#define DATA_CHUNK_SIZE (1 * 1024 * 1024)
-static long long unsigned data_offset = 0;
-static uint8_t *data_buffer = nullptr;
-static void *compressed_data_buffer = nullptr;
-static std::unordered_map<std::string, long long unsigned> data_map;
-
-static std::vector<char> data;
+std::vector<char> data_buffer;
+std::vector<char> compressed_data_buffer;
 
 static std::unordered_map<std::string, std::string> value_variables;
 static uint32_t value_index = 0;
@@ -221,51 +216,13 @@ print_set_handle(FILE *out, const trace::Call &call, const retrace::HandleType *
     }
 }
 
-static void
-flush_data_buffer(long long unsigned size)
-{
-    size_t compressed_size = 0;
-    snappy::RawCompress((const char *)data_buffer, size, (char *)compressed_data_buffer, &compressed_size);
-    fwrite(&compressed_size, sizeof(size_t), 1, data_file);
-    fwrite(compressed_data_buffer, compressed_size, 1, data_file);
-}
-
 static long long unsigned
 get_blob_offset(void *data, long long unsigned size)
 {
-    struct MD5Context md5c;
-    MD5Init(&md5c);
-    MD5Update(&md5c, (unsigned char *)data, size);
-    unsigned char signature[16];
-    MD5Final(signature, &md5c);
-
-    const char hex[] = "0123456789ABCDEF";
-    char csig[33];
-    for(int i = 0; i < sizeof(signature); i++){
-        csig[2*i    ] = hex[signature[i] >> 4];
-        csig[2*i + 1] = hex[signature[i] & 0xf];
-    }
-    csig[32] = '\0';
-
-    std::string hash = csig;
-    if (data_map.find(hash) != data_map.end())
-        return data_map.at(hash);
-
-    long long unsigned written_size = 0;
-    while (written_size < size) {
-        long long unsigned dst_offset = (data_offset + written_size) % DATA_CHUNK_SIZE;
-        long long unsigned write_size = std::min(DATA_CHUNK_SIZE - dst_offset, size - written_size);
-        memcpy(data_buffer + dst_offset, (uint8_t *)data + written_size, write_size);
-        written_size += write_size;
-
-        if (dst_offset + write_size == DATA_CHUNK_SIZE)
-            flush_data_buffer(DATA_CHUNK_SIZE);
-    }
-
-    long long unsigned result_offset = data_offset;
-    data_map[hash] = result_offset;
-    data_offset += size;
-    return result_offset;
+    long long unsigned offset = data_buffer.size();
+    data_buffer.resize(offset + size);
+    memcpy(&data_buffer[offset], data, size);
+    return offset;
 }
 
 static bool
@@ -370,12 +327,8 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
         trace::Blob *v = dynamic_cast<trace::Blob *>(value);
         if (!v)
             return true;
-      
-        const char *type_name = blob_type->type->c_decl.c_str();
-        if (strstr(type_name, "void"))
-            type_name = "unsigned char";
 
-        fprintf(out, "(%s)getData(%llu)", blob_type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
+        fprintf(out, "(%s)(data + %llu)", blob_type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
       
         return false;
     }
@@ -609,6 +562,66 @@ static bool value_type_has_handle(const retrace::ValueType *type) {
     return false;
 }
 
+static void
+end_sequence()
+{
+    if (sequence_file) {
+        fprintf(sequence_file, "}\n");
+        fclose(sequence_file);
+        sequence_file = nullptr;
+
+        fprintf(main_file, "    {sequence%u, nullptr},\n", sequence_index);
+        sequence_index++;
+
+        if (data_buffer.size()) {
+            compressed_data_buffer.resize(snappy::MaxCompressedLength(data_buffer.size()));
+
+            size_t compressed_size = 0;
+            snappy::RawCompress((const char *)data_buffer.data(), data_buffer.size(), compressed_data_buffer.data(), &compressed_size);
+            fwrite(&compressed_size, sizeof(size_t), 1, data_file);
+            fwrite(compressed_data_buffer.data(), compressed_size, 1, data_file);
+
+            data_buffer.clear();
+        } else {
+            size_t compressed_size = 0;
+            fwrite(&compressed_size, sizeof(size_t), 1, data_file);
+        }
+    }
+}
+
+static void
+before_call(bool new_wsi_sequence) {
+    bool split_sequence = call_index == MAX_SEQUENCE_LENGTH;
+    if (split_sequence)
+        call_index = 0;
+
+    if (new_wsi_sequence != is_wsi_sequence || split_sequence) {
+        is_wsi_sequence = new_wsi_sequence;
+
+        if (new_wsi_sequence || split_sequence) {
+            end_sequence();
+        }
+        if (!new_wsi_sequence || split_sequence) {
+            char sequence_filename[256];
+            snprintf(sequence_filename, sizeof(sequence_filename), "%s/sequence%u.c",
+                     target_directory.c_str(), sequence_index);
+
+            generated_filenames.push_back(sequence_filename);
+
+            sequence_file = fopen(sequence_filename, "w");
+            fprintf(sequence_file, "#include \"sequence.h\"\n\n");
+            fprintf(sequence_file, "void\n");
+            fprintf(sequence_file, "sequence%u(uintptr_t data) {\n", sequence_index);
+            fprintf(sequence_file, "    GLvoid *ptr = NULL; (void)ptr;\n");
+
+            out_param_index = 0;
+        }
+    }
+
+    if (!new_wsi_sequence)
+        call_index++;
+}
+
 void glretrace::dump_call_as_c(trace::Call &call) {
     if (ignore_calls.find(call.name()) != ignore_calls.end())
         return;
@@ -621,46 +634,12 @@ void glretrace::dump_call_as_c(trace::Call &call) {
     bool new_wsi_sequence =
         !strncmp("glX", call.name(), 3) || !strncmp("wgl", call.name(), 3);
 
-    bool split_sequence = call_index == MAX_SEQUENCE_LENGTH;
-    if (split_sequence)
-        call_index = 0;
-
-    if (new_wsi_sequence != is_wsi_sequence || split_sequence) {
-        is_wsi_sequence = new_wsi_sequence;
-
-        if (new_wsi_sequence || split_sequence) {
-            if (sequence_file) {
-                fprintf(sequence_file, "}\n");
-                fclose(sequence_file);
-                sequence_file = nullptr;
-
-                fprintf(main_file, "    {sequence%u, nullptr, %llu},\n", sequence_index, data_offset);
-                sequence_index++;
-            }
-        }
-        if (!new_wsi_sequence || split_sequence) {
-            char sequence_filename[256];
-            snprintf(sequence_filename, sizeof(sequence_filename), "%s/sequence%u.c",
-                     target_directory.c_str(), sequence_index);
-
-            generated_filenames.push_back(sequence_filename);
-
-            sequence_file = fopen(sequence_filename, "w");
-            fprintf(sequence_file, "#include \"sequence.h\"\n\n");
-            fprintf(sequence_file, "void\n");
-            fprintf(sequence_file, "sequence%u() {\n", sequence_index);
-            fprintf(sequence_file, "    GLvoid *ptr = NULL; (void)ptr;\n");
-
-            out_param_index = 0;
-        }
-    }
+    before_call(new_wsi_sequence);
 
     if (new_wsi_sequence) {
-        fprintf(main_file, "    {nullptr, %s, 0},\n", get_call_construction(&call).c_str());
+        fprintf(main_file, "    {nullptr, %s},\n", get_call_construction(&call).c_str());
         return;
     }
-
-    call_index++;
 
     if (is_active_uniform_block_name) {
         fprintf(sequence_file, "    mapUniformBlockName(%llu, %llu, \"%s\");\n",
@@ -851,8 +830,8 @@ void glretrace::dump_call_as_c(trace::Call &call) {
         const trace::Array *v = dynamic_cast<trace::Array *>(call.args[1].value);
         if (index == 0) {
             fprintf(sequence_file, "    resize_window(%u, %u);\n",
-                    (uint32_t)(v->values[1]->toFloat() + v->values[3]->toFloat()),
-                    (uint32_t)(v->values[2]->toFloat() + v->values[4]->toFloat()));
+                    (uint32_t)(v->values[0]->toFloat() + v->values[2]->toFloat()),
+                    (uint32_t)(v->values[1]->toFloat() + v->values[3]->toFloat()));
         }
     } else if (!strcmp("glActiveShaderProgram", call.name())) {
         pipeline_active_programs[(GLint)call.arg(0).toUInt()] =
@@ -998,11 +977,6 @@ trace::Bool false_value(false);
 
 replay_args args;
 
-void *getData(long long unsigned offset)
-{
-    return (uint8_t *)args.data->data + offset;
-}
-
 void *
 _getPublicProcAddress(const char *procName)
 {
@@ -1095,8 +1069,6 @@ clientWaitSync(GLenum result, GLsync sync, GLbitfield flags, GLuint64 timeout) {
 extern "C" {
 #endif
 
-void *getData(long long unsigned offset);
-
 void addRegion(unsigned long long address, void *buffer, unsigned long long size);
 void delRegionByPointer(void *ptr);
 void *toPointer(uintptr_t address);
@@ -1110,18 +1082,11 @@ void mapUniformBlockName(GLuint program, GLint index, const char *name);
 )");
 
     data_file = fopen((target_directory / "data.bin").c_str(), "wb");
-    data_buffer = (uint8_t *)malloc(DATA_CHUNK_SIZE);
-    compressed_data_buffer = malloc(snappy::MaxCompressedLength(DATA_CHUNK_SIZE));
 }
 
 void
 glretrace::dump_c_end() {
-    if (sequence_file) {
-        fprintf(sequence_file, "}\n");
-        fclose(sequence_file);
-        fprintf(main_file, "    {sequence%u, nullptr, %llu},\n", sequence_index, data_offset);
-        sequence_index++;
-    }
+    end_sequence();
 
     fclose(values_file);
 
@@ -1169,7 +1134,7 @@ get_replay_sequences(const replay_sequence **out_sequences, uint32_t *out_sequen
     }
   
     for (uint32_t i = 0; i < sequence_index; i++)
-      fprintf(sequence_h_file, "void sequence%u();\n", i);
+      fprintf(sequence_h_file, "void sequence%u(uintptr_t data);\n", i);
   
     fclose(state_file);
     fclose(header_file);
@@ -1200,11 +1165,7 @@ get_replay_sequences(const replay_sequence **out_sequences, uint32_t *out_sequen
 
     fclose(meson_file);
 
-    if (data_offset % DATA_CHUNK_SIZE)
-        flush_data_buffer(data_offset % DATA_CHUNK_SIZE);
     fclose(data_file);
-    free(data_buffer);
-    free(compressed_data_buffer);
 }
 
 static void
@@ -1213,6 +1174,8 @@ dump_malloc_as_c(trace::Call &call) {
     unsigned long long address = call.ret->toUIntPtr();
 
     if (address) {
+        before_call(false);
+
         fprintf(sequence_file, "    addRegion(%llu, malloc(%llu), %llu);\n",
                 address, size, size);
     }
@@ -1222,10 +1185,12 @@ static void
 dump_memcpy_as_c(trace::Call &call) {
     unsigned long long size = call.arg(2).toUInt();
     if (size) {
+        before_call(false);
+
         trace::Blob *src_blob = dynamic_cast<trace::Blob *>(&call.arg(1));
         if (src_blob) {
             fprintf(sequence_file,
-                    "    memcpy(toPointer(%llu), getData(%llu), %llu);\n",
+                    "    memcpy(toPointer(%llu), (void *)(data + %llu), %llu);\n",
                     (long long unsigned)call.arg(0).toPointer(), get_blob_offset(src_blob->buf, src_blob->size), size);
         } else {
             fprintf(sequence_file,
