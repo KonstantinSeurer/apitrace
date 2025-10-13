@@ -727,7 +727,7 @@ RelayRace::stopRunners(void) {
 
 static void
 mainLoop() {
-    retracer.addCallbacks(generateC ? stdc_dump_as_c_callbacks : stdc_callbacks);
+    retracer.addCallbacks(generateC ? stdc_codegen_callbacks : stdc_callbacks);
     addCallbacks(retracer);
 
     long long startTime = 0;
