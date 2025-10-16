@@ -70,7 +70,7 @@ static GLint active_program = 0;
 static GLint active_pipeline = 0;
 static std::unordered_map<GLint, GLint> pipeline_active_programs;
 
-static std::vector<trace::Call *> calls;
+static uint32_t thread_id = 0;
 
 #define MAX_SEQUENCE_LENGTH 10000
 
@@ -570,7 +570,7 @@ end_sequence()
         fclose(sequence_file);
         sequence_file = nullptr;
 
-        fprintf(main_file, "    {sequence%u, nullptr},\n", sequence_index);
+        fprintf(main_file, "    {sequence%u, nullptr, %u},\n", sequence_index, thread_id);
         sequence_index++;
 
         if (data_buffer.size()) {
@@ -590,8 +590,8 @@ end_sequence()
 }
 
 static void
-before_call(bool new_wsi_sequence) {
-    bool split_sequence = call_index == MAX_SEQUENCE_LENGTH;
+before_call(bool new_wsi_sequence, uint32_t new_thread_id) {
+    bool split_sequence = call_index == MAX_SEQUENCE_LENGTH || new_thread_id != thread_id;
     if (split_sequence)
         call_index = 0;
 
@@ -620,6 +620,8 @@ before_call(bool new_wsi_sequence) {
 
     if (!new_wsi_sequence)
         call_index++;
+
+    thread_id = new_thread_id;
 }
 
 void glretrace::call_codegen(trace::Call &call) {
@@ -634,10 +636,10 @@ void glretrace::call_codegen(trace::Call &call) {
     bool new_wsi_sequence =
         !strncmp("glX", call.name(), 3) || !strncmp("wgl", call.name(), 3);
 
-    before_call(new_wsi_sequence);
+    before_call(new_wsi_sequence, call.thread_id);
 
     if (new_wsi_sequence) {
-        fprintf(main_file, "    {nullptr, %s},\n", get_call_construction(&call).c_str());
+        fprintf(main_file, "    {nullptr, %s, %u},\n", get_call_construction(&call).c_str(), call.thread_id);
         return;
     }
 
@@ -1174,7 +1176,7 @@ malloc_codegen(trace::Call &call) {
     unsigned long long address = call.ret->toUIntPtr();
 
     if (address) {
-        before_call(false);
+        before_call(false, call.thread_id);
 
         fprintf(sequence_file, "    addRegion(%llu, malloc(%llu), %llu);\n",
                 address, size, size);
@@ -1185,7 +1187,7 @@ static void
 memcpy_codegen(trace::Call &call) {
     unsigned long long size = call.arg(2).toUInt();
     if (size) {
-        before_call(false);
+        before_call(false, call.thread_id);
 
         trace::Blob *src_blob = dynamic_cast<trace::Blob *>(&call.arg(1));
         if (src_blob) {
