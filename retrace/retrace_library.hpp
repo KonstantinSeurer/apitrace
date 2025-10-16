@@ -11,6 +11,7 @@ typedef void (*run_api_calls_cb)(uintptr_t data);
 struct replay_sequence {
     run_api_calls_cb run_api;
     trace::Call *call;
+    uint32_t thread_id;
 };
 
 typedef void *(*get_proc_addr_cb)(const char *procName);

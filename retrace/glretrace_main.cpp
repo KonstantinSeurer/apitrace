@@ -47,6 +47,7 @@
 #include "highlight.hpp"
 #include "metric_writer.hpp"
 #include "retrace_library.hpp"
+#include "retrace_threads.hpp"
 
 using namespace std::chrono_literals;
 
@@ -1000,9 +1001,21 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
 
     startTime = os::getTime();
 
+    uint32_t sequence_index = 0;
     uint32_t sequence_data_index = 0;
-    for (uint32_t i = 0; i < sequence_count; i++) {
-        if (sequences[i].run_api) {
+    RelayRace race;
+    race.get_next_baton = [&](Baton &next) {
+        if (sequence_index < sequence_count) {
+            next.data = (void *)(sequences + sequence_index);
+            next.thread_id = sequences[sequence_index].thread_id;
+        } else {
+            next.data = nullptr;
+        }
+        sequence_index++;
+    };
+    race.run_baton = [&](Baton baton) {
+        const replay_sequence *sequence = (const replay_sequence *)baton.data;
+        if (sequence->run_api) {
             /* Wait for data to be loaded if it is needed. */
             if (sequence_data_index >= loaded_sequence_data_count) {
                 long long waitStartTime = os::getTime();
@@ -1015,16 +1028,20 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
                           << sequence_data_index << ")" << std::endl;
             }
 
-            sequences[i].run_api((uintptr_t)sequence_data[sequence_data_index].data);
+            sequence->run_api((uintptr_t)sequence_data[sequence_data_index].data);
 
             free(sequence_data[sequence_data_index].data);
             consumed_data_size += sequence_data[sequence_data_index].size;
 
             sequence_data_index++;
         } else {
-            retrace::retraceCall(sequences[i].call);
+            retrace::retraceCall(sequence->call);
         }
-    }
+    };
+    race.flush = [](){
+        glFlush();
+    };
+    race.run();
 
     data_load_thread.join();
     delete[] sequence_data;
