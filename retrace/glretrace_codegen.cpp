@@ -1148,22 +1148,18 @@ get_replay_sequences(const replay_sequence **out_sequences, uint32_t *out_sequen
 )");
     fclose(sequence_h_file);
 
+    const char *trace_name = std::filesystem::path(retrace::trace_filename).stem().c_str();
+
     FILE *meson_file = fopen((target_directory / "meson.build").c_str(), "w");
-    fprintf(meson_file, "project('replay', 'cpp', 'c')\n");
+    fprintf(meson_file, "project('%s', 'cpp', 'c')\n", trace_name);
     fprintf(meson_file, "replay_lib = shared_library(\n");
-    fprintf(meson_file, "  'replay',\n");
-
-    for (uint32_t i = 0; i < generated_filenames.size(); i++) {
-      fprintf(meson_file, "  '%s'", generated_filenames[i].c_str());
-      if (i + 1 < generated_filenames.size())
-        fprintf(meson_file, ",");
-      fprintf(meson_file, "\n");
-    }
-
+    fprintf(meson_file, "  '%s',\n", trace_name);
+    for (const auto &generated_filename : generated_filenames)
+      fprintf(meson_file, "  '%s',\n", generated_filename.c_str());
+    fprintf(meson_file, "  name_prefix: ''\n");
     fprintf(meson_file, ")\n");
 
-    fprintf(meson_file,
-            "fs = import('fs')\nfs.copyfile('data.bin', 'libreplay.so.data')\n");
+    fprintf(meson_file, "fs = import('fs')\nfs.copyfile('data.bin', '%s.so.data')\n", trace_name);
 
     fclose(meson_file);
 

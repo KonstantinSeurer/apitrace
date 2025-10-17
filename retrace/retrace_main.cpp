@@ -107,6 +107,8 @@ bool resolveMSAA = true;
 Driver driver = DRIVER_DEFAULT;
 const char *driverModule = NULL;
 
+const char *trace_filename = NULL;
+
 bool doubleBuffer = true;
 unsigned samples = 1;
 
@@ -1177,8 +1179,9 @@ int main(int argc, char **argv)
          retrace::curPass++)
     {
         for (i = optind; i < argc; ++i) {
-            if (strlen(argv[i]) >= 3 && !strcmp(argv[i] + strlen(argv[i]) - 3, ".so")) {
-                retrace::replayBinary(retracer, argv[i]);
+            trace_filename = argv[i];
+            if (strlen(trace_filename) >= 3 && !strcmp(trace_filename + strlen(trace_filename) - 3, ".so")) {
+                retrace::replayBinary(retracer, trace_filename);
                 continue;
             }
 
@@ -1187,7 +1190,7 @@ int main(int argc, char **argv)
                 parser = lastFrameLoopParser(parser, loopCount);
             }
 
-            if (!parser->open(argv[i])) {
+            if (!parser->open(trace_filename)) {
                 return 1;
             }
 
