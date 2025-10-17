@@ -195,6 +195,8 @@ enum Driver {
 extern Driver driver;
 extern const char *driverModule;
 
+extern const char *trace_filename;
+
 extern bool doubleBuffer;
 extern unsigned samples;
 
