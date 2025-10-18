@@ -68,7 +68,10 @@ static uint32_t call_index = 0;
 
 static GLint active_program = 0;
 static GLint active_pipeline = 0;
+static GLint active_pack_buffer = 0;
 static std::unordered_map<GLint, GLint> pipeline_active_programs;
+
+static std::unordered_map<uint32_t, uintptr_t> current_context;
 
 static uint32_t thread_id = 0;
 
@@ -178,15 +181,17 @@ mapUniformBlockName(GLuint program, GLint index, const char *name) {
 
 static uint64_t
 get_handle_default_value(const char *name) {
-    if (strcmp("program", name))
-        return 0;
+    if (strstr(name, "getCurrentContext")) {
+        return current_context.at(thread_id);
+    } else if (!strcmp("program", name)) {
+        uint64_t program = active_program;
 
-    uint64_t program = active_program;
+        if (active_pipeline && pipeline_active_programs.find(active_pipeline) != pipeline_active_programs.end())
+            program = pipeline_active_programs.at(active_pipeline);
 
-    if (active_pipeline && pipeline_active_programs.find(active_pipeline) != pipeline_active_programs.end())
-      program = pipeline_active_programs.at(active_pipeline);
-
-    return program;
+        return program;
+    }
+    return 0;
 }
 
 static void
@@ -640,6 +645,31 @@ void glretrace::call_codegen(trace::Call &call) {
 
     before_call(new_wsi_sequence, call.thread_id);
 
+    if (!strcmp("CGLSetCurrentContext", call.name())) {
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(0).toUIntPtr();
+    } else if (!strcmp("eglMakeCurrent", call.name())) {
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(3).toUIntPtr();
+    } else if (!strcmp("glXMakeCurrent", call.name())) {
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(2).toUIntPtr();
+    } else if (!strcmp("glXMakeContextCurrent", call.name())) {
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(3).toUIntPtr();
+    } else if (!strcmp("wglMakeCurrent", call.name())) {
+        current_context[thread_id] = 0;
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(1).toUIntPtr();
+    } else if (!strcmp("wglMakeContextCurrentARB", call.name())) {
+        current_context[thread_id] = 0;
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(2).toUIntPtr();
+    } else if (!strcmp("wglShareLists", call.name())) {
+        if (call.ret->toBool())
+            current_context[thread_id] = call.arg(0).toUIntPtr();
+    }
+
     if (new_wsi_sequence) {
         fprintf(main_file, "    {nullptr, %s, %u},\n", get_call_construction(&call).c_str(), call.thread_id);
         return;
@@ -714,6 +744,41 @@ void glretrace::call_codegen(trace::Call &call) {
                 call.arg(2).toUInt());
     }
 
+    bool has_out_pointer = false;
+    if (func_type) {
+        for (uint32_t i = 0; i < call.args.size(); i++) {
+            const retrace::ArgType *arg_type = &func_type->parameter_types[i];
+            if (arg_type->output && (arg_type->type->kind == retrace::ValueTypeKind::pointer ||
+                                     arg_type->type->kind == retrace::ValueTypeKind::opaque))
+                has_out_pointer = true;
+        }
+    }
+
+    std::unordered_map<std::string, std::string> arg_overrides;
+    bool free_ptr = false;
+    if (has_out_pointer && !active_pack_buffer) {
+        if (!strcmp("glGetTexnImage", call.name())) {
+            fprintf(sequence_file, "    ptr = malloc(%llullu)\n", call.arg(4).toUInt());
+            arg_overrides["pixels"] = "ptr";
+            free_ptr = true;
+        } else if (!strcmp("glGetTextureImage", call.name())) {
+            fprintf(sequence_file, "    ptr = malloc(%llullu)\n", call.arg(4).toUInt());
+            arg_overrides["pixels"] = "ptr";
+            free_ptr = true;
+        } else if (!strcmp("glReadPixels", call.name())) {
+            fprintf(sequence_file, "    ptr = malloc(%llullu)\n", call.arg(2).toSInt() * call.arg(3).toSInt() * 64);
+            arg_overrides["pixels"] = "ptr";
+            free_ptr = true;
+        } else if (!strcmp("glReadnPixels", call.name())) {
+            fprintf(sequence_file, "    ptr = malloc(%llullu)\n", call.arg(6).toSInt());
+            arg_overrides["data"] = "ptr";
+            free_ptr = true;
+        } else {
+            std::cout << "warning: Skipping call " << call.name() << " because." << std::endl;
+            return;
+        }
+    }
+
     bool has_out_handle = false;
     if (func_type) {
         for (uint32_t i = 0; i < call.args.size(); i++) {
@@ -748,6 +813,12 @@ void glretrace::call_codegen(trace::Call &call) {
     for (uint32_t i = 0; i < call.args.size(); i++) {
         if (i)
             fprintf(sequence_file, ", ");
+
+        const char *arg_name = call.sig->arg_names[i];
+        if (arg_overrides.find(arg_name) != arg_overrides.end()) {
+            fprintf(sequence_file, "%s", arg_overrides.at(arg_name).c_str());
+            continue;
+        }
 
         const retrace::ArgType *arg_type = nullptr;
         if (func_type)
@@ -803,6 +874,9 @@ void glretrace::call_codegen(trace::Call &call) {
         out_param_index++;
     }
 
+    if (free_ptr)
+        fprintf(sequence_file, "    free(ptr);\n");
+
     /* GL specific handling. */
 
     if (!strcmp("glViewport", call.name())) {
@@ -844,6 +918,9 @@ void glretrace::call_codegen(trace::Call &call) {
         active_pipeline = (GLint)call.arg(0).toUInt();
     } else if (!strcmp("glUseProgram", call.name())) {
         active_program = (GLint)call.arg(0).toUInt();
+    } else if (!strcmp("glBindBuffer", call.name())) {
+        if (call.arg(0).toSInt() == GL_PIXEL_PACK_BUFFER)
+            active_program = (GLint)call.arg(1).toUInt();
     }
 }
 
