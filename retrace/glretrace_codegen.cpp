@@ -191,7 +191,7 @@ get_handle_default_value(const char *name) {
 
 static void
 print_get_handle(FILE *out, const trace::Call &call, const retrace::HandleType *handle_type,
-                 unsigned long long handle) {
+                 long long handle) {
     register_handle_map(handle_type);
     if (handle_type->key_name) {
         long long key = get_int_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name));
@@ -220,8 +220,10 @@ static long long unsigned
 get_blob_offset(void *data, long long unsigned size)
 {
     long long unsigned offset = data_buffer.size();
-    data_buffer.resize(offset + size);
-    memcpy(&data_buffer[offset], data, size);
+    if (size) {
+        data_buffer.resize(offset + size);
+        memcpy(&data_buffer[offset], data, size);
+    }
     return offset;
 }
 
@@ -274,7 +276,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
 
     if (type->kind == retrace::ValueTypeKind::handle) {
         const retrace::HandleType *handle_type = (const retrace::HandleType *)type;
-        print_get_handle(out, call, handle_type, value->toUInt());
+        print_get_handle(out, call, handle_type, value->toSInt());
         return false;
     }
 
@@ -1148,18 +1150,18 @@ get_replay_sequences(const replay_sequence **out_sequences, uint32_t *out_sequen
 )");
     fclose(sequence_h_file);
 
-    const char *trace_name = std::filesystem::path(retrace::trace_filename).stem().c_str();
+    std::string trace_name = std::filesystem::path(retrace::trace_filename).stem();
 
     FILE *meson_file = fopen((target_directory / "meson.build").c_str(), "w");
-    fprintf(meson_file, "project('%s', 'cpp', 'c')\n", trace_name);
+    fprintf(meson_file, "project('%s', 'cpp', 'c')\n", trace_name.c_str());
     fprintf(meson_file, "replay_lib = shared_library(\n");
-    fprintf(meson_file, "  '%s',\n", trace_name);
+    fprintf(meson_file, "  '%s',\n", trace_name.c_str());
     for (const auto &generated_filename : generated_filenames)
       fprintf(meson_file, "  '%s',\n", generated_filename.c_str());
     fprintf(meson_file, "  name_prefix: ''\n");
     fprintf(meson_file, ")\n");
 
-    fprintf(meson_file, "fs = import('fs')\nfs.copyfile('data.bin', '%s.so.data')\n", trace_name);
+    fprintf(meson_file, "fs = import('fs')\nfs.copyfile('data.bin', '%s.so.data')\n", trace_name.c_str());
 
     fclose(meson_file);
 
