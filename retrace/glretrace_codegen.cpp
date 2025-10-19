@@ -23,6 +23,7 @@
 
 #include <snappy.h>
 
+#include <cmath>
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
@@ -86,6 +87,14 @@ get_int_arg(const trace::Call &call, const char *name, long long default_value) 
     return default_value;
 }
 
+static const char *
+remap_handle_name(const char *name)
+{
+    if (!strcmp("program", name) || !strcmp("shader", name))
+        return "handleARB";
+    return name;
+}
+
 static void
 register_handle_map(const retrace::HandleType *handle_type) {
     std::string map_type = std::string("retrace::map<") + handle_type->c_decl + std::string(">");
@@ -93,6 +102,8 @@ register_handle_map(const retrace::HandleType *handle_type) {
       map_type = "std::unordered_map<" + handle_type->key_type->c_decl + ", " +
                  map_type + ">";
     }
+
+    const char *remapped_handle_name = remap_handle_name(handle_type->name);
 
     std::string decl = map_type + std::string(" ") +
                        std::string(handle_type->name) + std::string("_map");
@@ -111,7 +122,7 @@ register_handle_map(const retrace::HandleType *handle_type) {
                 "(%s)((uintptr_t)actual + i);\n}\n",
                 handle_type->name, handle_type->key_type->c_decl.c_str(),
                 handle_type->c_decl.c_str(), handle_type->c_decl.c_str(),
-                handle_type->name, handle_type->c_decl.c_str(),
+                remapped_handle_name, handle_type->c_decl.c_str(),
                 handle_type->c_decl.c_str());
 
             fprintf(sequence_h_file, "%s get_%s(%s key, %s trace);\n",
@@ -123,7 +134,7 @@ register_handle_map(const retrace::HandleType *handle_type) {
                 "%s\nget_%s(%s key, %s trace) {\n    return %s_map[key]",
                 handle_type->c_decl.c_str(), handle_type->name,
                 handle_type->key_type->c_decl.c_str(), handle_type->c_decl.c_str(),
-                handle_type->name);
+                remapped_handle_name);
             if (!strcmp("location", handle_type->name)) {
                 fprintf(state_file, ".lookupUniformLocation(trace);\n}\n");
             } else {
@@ -163,7 +174,7 @@ mapUniformBlockName(GLuint program, GLint index, const char *name) {
                     "i)] = "
                     "(%s)((uintptr_t)actual + i);\n}\n",
                     handle_type->name, handle_type->c_decl.c_str(),
-                    handle_type->c_decl.c_str(), handle_type->name,
+                    handle_type->c_decl.c_str(), remapped_handle_name,
                     handle_type->c_decl.c_str(), handle_type->c_decl.c_str());
 
             fprintf(sequence_h_file, "%s get_%s(%s trace);\n",
@@ -172,7 +183,7 @@ mapUniformBlockName(GLuint program, GLint index, const char *name) {
             fprintf(state_file,
                     "%s\nget_%s(%s trace) {\n    return %s_map[trace];\n}\n",
                     handle_type->c_decl.c_str(), handle_type->name,
-                    handle_type->c_decl.c_str(), handle_type->name);
+                    handle_type->c_decl.c_str(), remapped_handle_name);
         }
     }
 
@@ -190,6 +201,8 @@ get_handle_default_value(const char *name) {
             program = pipeline_active_programs.at(active_pipeline);
 
         return program;
+    } else if (!strcmp("programObj", name)) {
+        return active_program;
     }
     return 0;
 }
@@ -245,28 +258,37 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
         const retrace::LiteralType *literal_type =
             (const retrace::LiteralType *)type;
         if (!strcmp("Bool", literal_type->encodedKind)) {
-          if (value->toBool())
-            fprintf(out, "true");
-          else
-            fprintf(out, "false");
+            if (value->toBool())
+                fprintf(out, "true");
+            else
+                fprintf(out, "false");
         } else if (!strcmp("SInt", literal_type->encodedKind)) {
-          fprintf(out, "%lli", value->toSInt());
+            fprintf(out, "%lli", value->toSInt());
         } else if (!strcmp("UInt", literal_type->encodedKind)) {
-          fprintf(out, "%llu", value->toUInt());
+            fprintf(out, "%llullu", value->toUInt());
         } else if (!strcmp("Float", literal_type->encodedKind)) {
-          fprintf(out, "%f", value->toFloat());
+            if (std::isnan(value->toFloat()))
+                fprintf(out, "NAN");
+            else
+                fprintf(out, "%f", value->toFloat());
         } else if (!strcmp("Double", literal_type->encodedKind)) {
-          fprintf(out, "%f", value->toDouble());
+            if (std::isnan(value->toDouble()))
+                fprintf(out, "NAN");
+            else
+                fprintf(out, "%f", value->toDouble());
         } else {
-          abort();
+            abort();
         }
         return false;
     }
 
     if (type->kind == retrace::ValueTypeKind::pointer ||
           type->kind == retrace::ValueTypeKind::int_pointer) {
-        fprintf(out, "(%s)0x%llx", type->c_decl.c_str(),
-                (long long unsigned)value->toPointer());
+        trace::Blob *v = dynamic_cast<trace::Blob *>(value);
+        if (v)
+            fprintf(out, "(%s)(data + %llullu)", type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
+        else
+            fprintf(out, "(%s)0x%llxllu", type->c_decl.c_str(), (long long unsigned)value->toPointer());
         return false;
     }
 
@@ -327,7 +349,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
 
         trace::Pointer *p = dynamic_cast<trace::Pointer *>(value);
         if (p) {
-            fprintf(out, "(%s)toPointer(%llu)", type->c_decl.c_str(), p->toUIntPtr());
+            fprintf(out, "(%s)toPointer(%llullu)", type->c_decl.c_str(), p->toUIntPtr());
             return false;
         }
       
@@ -335,7 +357,7 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
         if (!v)
             return true;
 
-        fprintf(out, "(%s)(data + %llu)", blob_type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
+        fprintf(out, "(%s)(data + %llullu)", blob_type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
       
         return false;
     }
@@ -367,8 +389,11 @@ print_value_expression(FILE *out, const retrace::ValueType *type, const trace::C
     }
 
     if (type->kind == retrace::ValueTypeKind::opaque) {
-        fprintf(out, "(%s)toPointer(0x%llx)", type->c_decl.c_str(),
-                (long long unsigned)value->toPointer());
+        trace::Blob *v = dynamic_cast<trace::Blob *>(value);
+        if (v)
+            fprintf(out, "(%s)(data + %llullu)", type->c_decl.c_str(), get_blob_offset(v->buf, v->size));
+        else
+            fprintf(out, "(%s)toPointer(0x%llxllu)", type->c_decl.c_str(), (long long unsigned)value->toPointer());
         return false;
     }
 
@@ -676,7 +701,7 @@ void glretrace::call_codegen(trace::Call &call) {
     }
 
     if (is_active_uniform_block_name) {
-        fprintf(sequence_file, "    mapUniformBlockName(%llu, %llu, \"%s\");\n",
+        fprintf(sequence_file, "    mapUniformBlockName(%llullu, %llullu, \"%s\");\n",
                 call.arg(0).toUInt(), call.arg(1).toUInt(), call.arg(4).toString());
         return;
     }
@@ -740,7 +765,7 @@ void glretrace::call_codegen(trace::Call &call) {
                 (uint32_t)call.ret->toUInt());
         print_value_expression(sequence_file, func_type->parameter_types[0].type,
                                call, &call.arg(0));
-        fprintf(sequence_file, ", %u, %llu);\n", (uint32_t)call.arg(1).toUInt(),
+        fprintf(sequence_file, ", %u, %llullu);\n", (uint32_t)call.arg(1).toUInt(),
                 call.arg(2).toUInt());
     }
 
@@ -805,7 +830,7 @@ void glretrace::call_codegen(trace::Call &call) {
             (const retrace::HandleType *)func_type->return_type;
         print_set_handle(sequence_file, call, handle_type, call.ret->toSInt());
     } else if (func_type->return_type->kind == retrace::ValueTypeKind::linear_pointer && call.ret) {
-        fprintf(sequence_file, "addRegion(%llu, ", call.ret->toUIntPtr());
+        fprintf(sequence_file, "addRegion(%llullu, ", call.ret->toUIntPtr());
     }
 
     fprintf(sequence_file, "%s(", call.name());
@@ -916,7 +941,7 @@ void glretrace::call_codegen(trace::Call &call) {
             (GLint)call.arg(1).toUInt();
     } else if (!strcmp("glBindProgramPipeline", call.name())) {
         active_pipeline = (GLint)call.arg(0).toUInt();
-    } else if (!strcmp("glUseProgram", call.name())) {
+    } else if (!strcmp("glUseProgram", call.name()) || !strcmp("glUseProgramObjectARB", call.name())) {
         active_program = (GLint)call.arg(0).toUInt();
     } else if (!strcmp("glBindBuffer", call.name())) {
         if (call.arg(0).toSInt() == GL_PIXEL_PACK_BUFFER)
@@ -1141,6 +1166,7 @@ clientWaitSync(GLenum result, GLsync sync, GLbitfield flags, GLuint64 timeout) {
     fprintf(sequence_h_file, "%s", R"(
 #pragma once
 
+#include <math.h>
 #include <string.h>
 
 #define RETRACE
@@ -1253,7 +1279,7 @@ malloc_codegen(trace::Call &call) {
     if (address) {
         before_call(false, call.thread_id);
 
-        fprintf(sequence_file, "    addRegion(%llu, malloc(%llu), %llu);\n",
+        fprintf(sequence_file, "    addRegion(%llullu, malloc(%llullu), %llullu);\n",
                 address, size, size);
     }
 }
@@ -1267,11 +1293,11 @@ memcpy_codegen(trace::Call &call) {
         trace::Blob *src_blob = dynamic_cast<trace::Blob *>(&call.arg(1));
         if (src_blob) {
             fprintf(sequence_file,
-                    "    memcpy(toPointer(%llu), (void *)(data + %llu), %llu);\n",
+                    "    memcpy(toPointer(%llullu), (void *)(data + %llullu), %llullu);\n",
                     (long long unsigned)call.arg(0).toPointer(), get_blob_offset(src_blob->buf, src_blob->size), size);
         } else {
             fprintf(sequence_file,
-                    "    memcpy(toPointer(%llu), toPointer(%llu), %llu);\n",
+                    "    memcpy(toPointer(%llullu), toPointer(%llullu), %llullu);\n",
                     (long long unsigned)call.arg(0).toPointer(),
                     (long long unsigned)call.arg(1).toPointer(), size);
         }
