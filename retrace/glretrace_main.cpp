@@ -1016,6 +1016,12 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     race.run_baton = [&](Baton baton) {
         const replay_sequence *sequence = (const replay_sequence *)baton.data;
         if (sequence->run_api) {
+            /* codegen assumes that program, program object and shader names do not collide
+             * to handle applicatins mixing them. This is true for drivers that implement
+             * GL_ARB_shader_objects.
+             */
+            assert(glretrace::supportsARBShaderObjects);
+
             /* Wait for data to be loaded if it is needed. */
             if (sequence_data_index >= loaded_sequence_data_count) {
                 long long waitStartTime = os::getTime();
