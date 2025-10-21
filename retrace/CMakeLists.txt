@@ -159,6 +159,7 @@ add_library (retrace_common STATIC
     process_name.hpp
     process_name.cpp
     retrace.cpp
+    retrace_codegen.cpp
     retrace_main.cpp
     retrace_stdc.cpp
     retrace_swizzle.cpp
@@ -167,6 +168,16 @@ add_library (retrace_common STATIC
     state_writer_json.cpp
     state_writer_ubjson.cpp
     ws.cpp
+    trace_model_hpp.h
+    trace_model_cpp.h
+    os_hpp.h
+    os_posix_cpp.h
+    os_string_hpp.h
+    os_backtrace_hpp.h
+    os_backtrace_cpp.h
+    retrace_library_hpp.h
+    retrace_swizzle_cpp.h
+    retrace_swizzle_hpp.h
     ${ws_os}
 )
 target_link_libraries (retrace_common
@@ -209,20 +220,10 @@ add_library (glretrace_common STATIC
     metric_backend_amd_perfmon.cpp
     metric_backend_intel_perfquery.cpp
     metric_backend_opengl.cpp
-    trace_model_hpp.h
-    trace_model_cpp.h
     glproc_h.h
     glproc_cpp.h
-    os_hpp.h
-    os_posix_cpp.h
-    os_string_hpp.h
-    os_backtrace_hpp.h
-    os_backtrace_cpp.h
     eglimports_h.h
     glimports_h.h
-    retrace_library_hpp.h
-    retrace_swizzle_cpp.h
-    retrace_swizzle_hpp.h
 )
 add_dependencies (glretrace_common glproc)
 target_link_libraries (glretrace_common
