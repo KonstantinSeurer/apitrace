@@ -78,10 +78,8 @@ struct NamedValue {
     trace::Value *value;
 };
 
-static uint32_t call_number = 0;
-
 static trace::Call *
-createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, trace::Value *ret, const std::vector<NamedValue> &args) {
+createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, uint32_t no, trace::Value *ret, const std::vector<NamedValue> &args) {
     trace::FunctionSig *sig = new trace::FunctionSig;
     sig->id = sig_id;
     sig->name = name;
@@ -97,7 +95,7 @@ createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, trace::Va
     for (uint32_t i = 0; i < args.size(); i++)
         call->args[i] = {args[i].value};
 
-    call->no = call_number++;
+    call->no = no;
 
     return call;
 }
@@ -480,7 +478,8 @@ std::string
 Codegen::get_call_construction(trace::Call &call)
 {
     const trace::FunctionSig *sig = call.sig;
-    std::string expr = "createCall(" + std::to_string(sig->id) + ", \"" + sig->name + "\", " + std::to_string(call.flags) + ", ";
+    std::string expr = "createCall(" + std::to_string(sig->id) + ", \"" + sig->name + "\", " +
+                       std::to_string(call.flags) + ", " + std::to_string(call.no) + ", ";
     expr += get_value_construction(call.ret);
     expr += ", {";
     for (uint32_t i = 0; i < call.args.size(); i++) {
@@ -515,11 +514,11 @@ remap_handle_name(const char *name)
 
 void
 Codegen::emit_get_handle(const trace::Call &call, const retrace::HandleType *handle_type, long long handle) {
-    std::unordered_map<uint64_t, std::map<uint64_t, HandleRange>> &key_map = handle_maps[remap_handle_name(handle_type->name)];
+    std::unordered_map<long long, std::map<long long, HandleRange>> &key_map = handle_maps[remap_handle_name(handle_type->name)];
     long long key = handle_type->key_name ? get_int_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name)) : 0;
-    std::map<uint64_t, HandleRange> &range_map = key_map[key];
+    std::map<long long, HandleRange> &range_map = key_map[key];
 
-    std::map<uint64_t, HandleRange>::iterator it = range_map.lower_bound(handle);
+    std::map<long long, HandleRange>::iterator it = range_map.lower_bound(handle);
     while (it != range_map.begin()) {
         auto pred = it;
         pred--;
@@ -529,9 +528,8 @@ Codegen::emit_get_handle(const trace::Call &call, const retrace::HandleType *han
             break;
         }
     }
-    assert(it != range_map.end());
 
-    if (handle < it->second.base || handle >= it->second.base + it->second.range) {
+    if (it == range_map.end() || handle < it->second.base || handle >= it->second.base + it->second.range) {
         sequence_c << "(" << handle_type->c_decl << ")";
         sequence_c << handle;
     } else {
@@ -544,9 +542,9 @@ Codegen::emit_get_handle(const trace::Call &call, const retrace::HandleType *han
 
 void
 Codegen::emit_set_handle(const trace::Call &call, const retrace::HandleType *handle_type, long long handle) {
-    std::unordered_map<uint64_t, std::map<uint64_t, HandleRange>> &key_map = handle_maps[remap_handle_name(handle_type->name)];
+    std::unordered_map<long long, std::map<long long, HandleRange>> &key_map = handle_maps[remap_handle_name(handle_type->name)];
     long long key = handle_type->key_name ? get_int_arg(call, handle_type->key_name, get_handle_default_value(handle_type->key_name)) : 0;
-    std::map<uint64_t, HandleRange> &range_map = key_map[key];
+    std::map<long long, HandleRange> &range_map = key_map[key];
 
     uint64_t count = get_int_arg(call, handle_type->range, 1);
 
@@ -554,7 +552,13 @@ Codegen::emit_set_handle(const trace::Call &call, const retrace::HandleType *han
     if (range_map.find(handle) == range_map.end()) {
         range.base = handle;
         range.range = count;
-        range.variable_name = std::string(remap_handle_name(handle_type->name)) + "_" + std::to_string(handle);
+        range.variable_name = std::string(remap_handle_name(handle_type->name)) + "_";
+        if (handle >= 0) {
+            range.variable_name += std::to_string(handle);
+        } else {
+            range.variable_name += "m";
+            range.variable_name += std::to_string(-handle);
+        }
         if (handle_type->key_name) {
             range.variable_name = std::string(remap_handle_name(handle_type->key_name)) +
                                   "_" + std::to_string(key) + "_" + range.variable_name;

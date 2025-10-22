@@ -68,7 +68,7 @@ public:
     uint32_t value_index = 0;
 
     // std::unordered_set<std::string> handle_maps;
-    std::unordered_map<std::string, std::unordered_map<uint64_t, std::map<uint64_t, HandleRange>>> handle_maps;
+    std::unordered_map<std::string, std::unordered_map<long long, std::map<long long, HandleRange>>> handle_maps;
 
     uint32_t out_param_index = 0;
 
