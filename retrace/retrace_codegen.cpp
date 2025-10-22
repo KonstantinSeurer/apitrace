@@ -605,14 +605,13 @@ Codegen::emit_value_expression(const trace::Call &call, const retrace::ValueType
             sequence_c <<  value->toSInt() << "ll";
         } else if (!strcmp("UInt", literal_type->encodedKind)) {
             sequence_c << value->toUInt() << "llu";
-        } else if (!strcmp("Float", literal_type->encodedKind)) {
-            if (std::isnan(value->toFloat()))
-                sequence_c << "NAN";
-            else
-                sequence_c << value->toFloat();
-        } else if (!strcmp("Double", literal_type->encodedKind)) {
+        } else if (!strcmp("Float", literal_type->encodedKind) || !strcmp("Double", literal_type->encodedKind)) {
             if (std::isnan(value->toDouble()))
                 sequence_c << "NAN";
+            else if (value->toDouble() == INFINITY)
+                sequence_c << "INFINITY";
+            else if (value->toDouble() == -INFINITY)
+                sequence_c << "-INFINITY";
             else
                 sequence_c << value->toDouble();
         } else {
