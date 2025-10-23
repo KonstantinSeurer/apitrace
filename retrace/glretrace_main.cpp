@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -967,14 +968,26 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     float timeInterval = 0;
     retrace::frameNo = 0;
 
-    std::cout << "info: Opening '" << library << "'..." << std::flush;
+    std::error_code canonical_error;
+    std::string library_path = std::filesystem::canonical(library, canonical_error);
+    if (canonical_error) {
+        std::cout << "error: " << canonical_error.message() << std::endl;
+        return;
+    }
+
+    std::cout << "info: Opening '" << library_path << "'..." << std::flush;
     startTime = os::getTime();
 
-    os::Library replay = os::openLibrary(library);
+    os::Library replay = os::openLibrary(library_path.c_str());
+     if (!replay) {
+        std::cout << "\nerror: " << dlerror() << std::endl;
+        return;
+    }
+
     get_replay_sequences_cb get_sequences = (get_replay_sequences_cb)os::getLibrarySymbol(
         replay, "get_replay_sequences");
     if (!get_sequences) {
-        std::cout << "error: " << dlerror() << std::endl;
+        std::cout << "\nerror: " << dlerror() << std::endl;
         return;
     }
 
@@ -996,7 +1009,7 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     std::atomic<uint32_t> loaded_sequence_data_count = 0;
     std::atomic<uint64_t> consumed_data_size = 0;
 
-    std::string data_file_path = std::string(library) + ".data";
+    std::string data_file_path = std::string(library_path) + ".data";
     std::thread data_load_thread(load_data_async, data_file_path, sequence_data, &loaded_sequence_data_count, &consumed_data_size);
 
     startTime = os::getTime();
