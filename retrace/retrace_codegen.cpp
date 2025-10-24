@@ -317,7 +317,7 @@ Codegen::begin_sequence(uint32_t new_thread_id) {
     sequence_c << "#include \"sequence.h\"\n\n";
     sequence_c << "void\n";
     sequence_c << "sequence" << sequence_index << "(uintptr_t data) {\n";
-    sequence_c << "    GLvoid *ptr = NULL; (void)ptr;\n";
+    sequence_c << "    void *ptr = NULL; (void)ptr;\n";
 
     out_param_index = 0;
 
