@@ -79,7 +79,7 @@ struct NamedValue {
 };
 
 static trace::Call *
-createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, uint32_t no, trace::Value *ret, const std::vector<NamedValue> &args) {
+createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, trace::Value *ret, const std::vector<NamedValue> &args) {
     trace::FunctionSig *sig = new trace::FunctionSig;
     sig->id = sig_id;
     sig->name = name;
@@ -94,8 +94,6 @@ createCall(trace::Id sig_id, const char *name, trace::CallFlags flags, uint32_t 
     call->ret = ret;
     for (uint32_t i = 0; i < args.size(); i++)
         call->args[i] = {args[i].value};
-
-    call->no = no;
 
     return call;
 }
@@ -329,25 +327,21 @@ Codegen::end_sequence() {
     if (!inside_sequence)
         return;
 
-    sequence_c << "}\n";
-    sequence_c.close();
-
-    main_cpp << "    {sequence" << sequence_index << ", nullptr, " << thread_id << "},\n";
-    sequence_index++;
-
+    size_t compressed_size = 0;
     if (data_buffer.size()) {
         compressed_data_buffer.resize(snappy::MaxCompressedLength(data_buffer.size()));
 
-        size_t compressed_size = 0;
         snappy::RawCompress((const char *)data_buffer.data(), data_buffer.size(), compressed_data_buffer.data(), &compressed_size);
-        data_bin.write((const char *)&compressed_size, sizeof(size_t));
         data_bin.write(compressed_data_buffer.data(), compressed_size);
 
         data_buffer.clear();
-    } else {
-        size_t compressed_size = 0;
-        data_bin.write((const char *)&compressed_size, sizeof(size_t));
     }
+
+    sequence_c << "}\n";
+    sequence_c.close();
+
+    main_cpp << "    {sequence" << sequence_index << ", nullptr, 0, " << thread_id << ", " << compressed_size << "},\n";
+    sequence_index++;
 
     inside_sequence = false;
 }
@@ -479,7 +473,7 @@ Codegen::get_call_construction(trace::Call &call)
 {
     const trace::FunctionSig *sig = call.sig;
     std::string expr = "createCall(" + std::to_string(sig->id) + ", \"" + sig->name + "\", " +
-                       std::to_string(call.flags) + ", " + std::to_string(call.no) + ", ";
+                       std::to_string(call.flags) + ", ";
     expr += get_value_construction(call.ret);
     expr += ", {";
     for (uint32_t i = 0; i < call.args.size(); i++) {
@@ -499,7 +493,7 @@ void
 Codegen::emit_constructed_call(trace::Call &call)
 {
     assert(!inside_sequence);
-    main_cpp << "    {nullptr, " << get_call_construction(call) << ", " << call.thread_id << "},\n";
+    main_cpp << "    {nullptr, " << get_call_construction(call) << ", " << call.no << ", " << call.thread_id << ", 0},\n";
 }
 
 static const char *

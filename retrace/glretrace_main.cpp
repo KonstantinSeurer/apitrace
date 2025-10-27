@@ -919,45 +919,124 @@ retrace::addCallbacks(retrace::Retracer &retracer)
 #define MAX_DATA_READ_AHEAD (1024 * 1024 * 1024)
 
 struct data_buffer {
-    void *data;
+    std::atomic<void *> data;
     uint64_t size;
 };
 
-static void
-load_data_async(const std::string &filename, data_buffer *sequence_data, std::atomic<uint32_t> *loaded_sequence_data_count,
-                std::atomic<uint64_t> *consumed_data_size) {
-    FILE *data_file = fopen(filename.c_str(), "rb");
+struct data_load_work_item {
+    void *compressed;
+    uint32_t compressed_length;
+    uint32_t index;
+};
 
-    std::vector<char> compressed_buffer;
+class DataStreamer {
+public:
+    DataStreamer(const std::string &data_file_path, const replay_sequence *sequences, uint32_t sequence_count, data_buffer *sequence_data)
+        : data_file_path(data_file_path), sequences(sequences), sequence_count(sequence_count), sequence_data(sequence_data) {
+    }
 
-    uint64_t loaded_data_size = 0;
-    for (uint32_t i = 0;; i++) {
-        size_t compressed_length = 0;
-        if (!fread(&compressed_length, sizeof(size_t), 1, data_file))
-            break;
+    void start() {
+        const uint32_t num_threads = std::thread::hardware_concurrency();
+        for (uint32_t ii = 0; ii < num_threads; ++ii) {
+            decompress_threads.emplace_back(std::thread(decompress_thread_main, this));
+        }
+        read_thread = std::thread(read_thread_main, this);
+    }
 
-        compressed_buffer.resize(compressed_length);
-        fread(compressed_buffer.data(), compressed_length, 1, data_file);
+    void stop() {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            should_terminate = true;
+        }
+        work_available_condition.notify_all();
+        for (std::thread& thread : decompress_threads) {
+            thread.join();
+        }
+        read_thread.join();
+        decompress_threads.clear();
+    }
 
-        size_t uncompressed_length = 0;
-        snappy::GetUncompressedLength(compressed_buffer.data(), compressed_length, &uncompressed_length);
-        void *data = malloc(uncompressed_length);
-        snappy::RawUncompress(compressed_buffer.data(), compressed_length, (char *)data);
-        sequence_data[i].data = data;
-        sequence_data[i].size = uncompressed_length;
+    static void read_thread_main(DataStreamer *streamer) {
+        FILE *data_file = fopen(streamer->data_file_path.c_str(), "rb");
 
-        *loaded_sequence_data_count = i + 1;
+        uint64_t loaded_data_size = 0;
+        for (uint32_t i = 0; i < streamer->sequence_count; i++) {
+            size_t compressed_length = streamer->sequences[i].compressed_data_size;
+            if (!compressed_length)
+                continue;
 
-        loaded_data_size += uncompressed_length;
+            data_load_work_item work_item;
+            work_item.compressed = malloc(compressed_length);
+            work_item.compressed_length = compressed_length;
+            work_item.index = i;
 
-        /* Do not read to far ahead to limit memory usage. */
-        while (loaded_data_size > *consumed_data_size + MAX_DATA_READ_AHEAD) {
-            std::this_thread::sleep_for(1ms);
+            fread((char *)work_item.compressed, compressed_length, 1, data_file);
+
+            size_t uncompressed_length = 0;
+            snappy::GetUncompressedLength((const char *)work_item.compressed, compressed_length, &uncompressed_length);
+
+            {
+                std::unique_lock<std::mutex> lock(streamer->mutex);
+                streamer->work_items.push(work_item);
+            }
+            streamer->work_available_condition.notify_one();
+
+            loaded_data_size += uncompressed_length;
+
+            while (loaded_data_size > streamer->consumed_data_size + MAX_DATA_READ_AHEAD) {
+                std::this_thread::sleep_for(1ms);
+            }
+        }
+
+        fclose(data_file);
+    }
+
+    static void decompress_thread_main(DataStreamer *streamer) {
+        while (true) {
+            data_load_work_item work_item;
+            {
+                std::unique_lock<std::mutex> lock(streamer->mutex);
+                streamer->work_available_condition.wait(lock, [streamer] {
+                    return !streamer->work_items.empty() || streamer->should_terminate;
+                });
+
+                if (streamer->should_terminate)
+                    return;
+
+                work_item = streamer->work_items.front();
+                streamer->work_items.pop();
+            }
+
+            size_t uncompressed_length = 0;
+            snappy::GetUncompressedLength((const char *)work_item.compressed, work_item.compressed_length, &uncompressed_length);
+            void *data = malloc(uncompressed_length);
+            snappy::RawUncompress((const char *)work_item.compressed, work_item.compressed_length, (char *)data);
+            free(work_item.compressed);
+            streamer->sequence_data[work_item.index].size = uncompressed_length;
+            streamer->sequence_data[work_item.index].data = data;
         }
     }
 
-    fclose(data_file);
-}
+
+    std::string data_file_path;
+
+    const replay_sequence *sequences;
+    uint32_t sequence_count;
+
+    data_buffer *sequence_data;
+
+    std::atomic<uint64_t> consumed_data_size = 0;
+
+    bool should_terminate = false;
+
+    std::mutex mutex;
+    std::condition_variable work_available_condition;
+
+    std::vector<std::thread> decompress_threads;
+    std::thread read_thread;
+
+    std::queue<data_load_work_item> work_items;
+};
 
 void
 retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
@@ -1006,16 +1085,14 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
     get_sequences(&sequences, &sequence_count, &args);
 
     data_buffer *sequence_data = new data_buffer[sequence_count];
-    std::atomic<uint32_t> loaded_sequence_data_count = 0;
-    std::atomic<uint64_t> consumed_data_size = 0;
 
     std::string data_file_path = std::string(library_path) + ".data";
-    std::thread data_load_thread(load_data_async, data_file_path, sequence_data, &loaded_sequence_data_count, &consumed_data_size);
+    DataStreamer streamer(data_file_path, sequences, sequence_count, sequence_data);
+    streamer.start();
 
     startTime = os::getTime();
 
     uint32_t sequence_index = 0;
-    uint32_t sequence_data_index = 0;
     RelayRace race;
     race.get_next_baton = [&](Baton &next) {
         if (sequence_index < sequence_count) {
@@ -1024,7 +1101,6 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
         } else {
             next.data = nullptr;
         }
-        sequence_index++;
     };
     race.run_baton = [&](Baton baton) {
         const replay_sequence *sequence = (const replay_sequence *)baton.data;
@@ -1036,33 +1112,34 @@ retrace::replayBinary(retrace::Retracer &retracer, const char *library) {
             assert(glretrace::supportsARBShaderObjects);
 
             /* Wait for data to be loaded if it is needed. */
-            if (sequence_data_index >= loaded_sequence_data_count) {
+            if (sequence->compressed_data_size && !sequence_data[sequence_index].data.load()) {
                 long long waitStartTime = os::getTime();
                 do  {
                     std::this_thread::sleep_for(100us);
-                } while (sequence_data_index >= loaded_sequence_data_count);
+                } while (!sequence_data[sequence_index].data);
                 long long waitEndTime = os::getTime();
                 timeInterval = (waitEndTime - waitStartTime) * (1.0 / os::timeFrequency);
                 std::cout << "warning: Waited " << timeInterval << " secs for data (sequence = "
-                          << sequence_data_index << ")" << std::endl;
+                          << sequence_index << ")" << std::endl;
             }
 
-            sequence->run_api((uintptr_t)sequence_data[sequence_data_index].data);
+            sequence->run_api((uintptr_t)sequence_data[sequence_index].data.load());
 
-            free(sequence_data[sequence_data_index].data);
-            consumed_data_size += sequence_data[sequence_data_index].size;
-
-            sequence_data_index++;
+            free(sequence_data[sequence_index].data.load());
+            streamer.consumed_data_size += sequence_data[sequence_index].size;
         } else {
+            sequence->call->no = sequence->call_no;
             retrace::retraceCall(sequence->call);
         }
+
+        sequence_index++;
     };
     race.flush = [](){
         glFlush();
     };
     race.run();
 
-    data_load_thread.join();
+    streamer.stop();
     delete[] sequence_data;
 
     retrace::finishRendering();

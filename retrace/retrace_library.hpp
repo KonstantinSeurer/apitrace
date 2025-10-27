@@ -1,6 +1,4 @@
-
-#ifndef RETRACE_LIBRARY_HPP
-#define RETRACE_LIBRARY_HPP
+#pragma once
 
 #include <cstdint>
 
@@ -11,7 +9,12 @@ typedef void (*run_api_calls_cb)(uintptr_t data);
 struct replay_sequence {
     run_api_calls_cb run_api;
     trace::Call *call;
+    /* Used for patching call->no during replay. This avoids
+     * creating many similar calls for multi-frame traces.
+     */
+    uint32_t call_no;
     uint32_t thread_id;
+    uint32_t compressed_data_size;
 };
 
 typedef void *(*get_proc_addr_cb)(const char *procName);
@@ -41,5 +44,3 @@ typedef void(*get_replay_sequences_cb)(const replay_sequence **sequences,
 
 /* Set by get_replay_sequences */
 extern replay_args args;
-
-#endif
